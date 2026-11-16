@@ -9,6 +9,7 @@ interface SpeechRecognitionState {
     isSupported: boolean;
     isListening: boolean;
     transcript: string;
+    finalTranscript: string;
     error: string | null;
     startListening: (mode: ListeningMode) => void;
     stopListening: () => void;
@@ -19,11 +20,14 @@ export function useSpeechRecognition(): SpeechRecognitionState {
     const [isSupported, setIsSupported] = useState(false);
     const [isListening, setIsListening] = useState(false);
     const [transcript, setTranscript] = useState("");
+    const [finalTranscript, setFinalTranscript] = useState("");
     const [error, setError] = useState<string | null>(null);
 
     const recognitionRef = useRef<SpeechRecognition | null>(null);
     const shouldContinueRef = useRef(false);
+    const isListeningRef = useRef(false);
     const finalTranscriptRef = useRef("");
+    const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const modeRef = useRef<ListeningMode>("push-to-talk");
 
     useEffect(() => {
@@ -35,12 +39,28 @@ export function useSpeechRecognition(): SpeechRecognitionState {
 
         return () => {
             shouldContinueRef.current = false;
+
+            if (restartTimerRef.current) {
+                clearTimeout(restartTimerRef.current);
+            }
+
             recognitionRef.current?.abort();
         };
     }, []);
 
+    const resetTranscript = useCallback(() => {
+        finalTranscriptRef.current = "";
+        setTranscript("");
+        setFinalTranscript("");
+    }, []);
+
     const stopListening = useCallback(() => {
         shouldContinueRef.current = false;
+
+        if (restartTimerRef.current) {
+            clearTimeout(restartTimerRef.current);
+            restartTimerRef.current = null;
+        }
 
         try {
             recognitionRef.current?.stop();
@@ -48,6 +68,7 @@ export function useSpeechRecognition(): SpeechRecognitionState {
             // Recognition may already have stopped.
         }
 
+        isListeningRef.current = false;
         setIsListening(false);
     }, []);
 
@@ -61,16 +82,15 @@ export function useSpeechRecognition(): SpeechRecognitionState {
             return;
         }
 
-        if (isListening) return;
+        if (isListeningRef.current) return;
 
         setError(null);
-        setTranscript("");
-        finalTranscriptRef.current = "";
+        resetTranscript();
+
         modeRef.current = mode;
         shouldContinueRef.current = mode === "continuous";
 
         const recognition = new SpeechRecognitionAPI();
-
         recognitionRef.current = recognition;
 
         recognition.lang = "en-US";
@@ -79,22 +99,20 @@ export function useSpeechRecognition(): SpeechRecognitionState {
         recognition.maxAlternatives = 1;
 
         recognition.onstart = () => {
+            isListeningRef.current = true;
             setIsListening(true);
         };
 
         recognition.onresult = (event) => {
             let interimTranscript = "";
 
-            for (
-                let i = event.resultIndex;
-                i < event.results.length;
-                i++
-            ) {
+            for (let i = event.resultIndex; i < event.results.length; i++) {
                 const result = event.results[i];
                 const text = result[0].transcript;
 
                 if (result.isFinal) {
                     finalTranscriptRef.current += text + " ";
+                    setFinalTranscript(finalTranscriptRef.current.trim());
                 } else {
                     interimTranscript += text;
                 }
@@ -106,13 +124,17 @@ export function useSpeechRecognition(): SpeechRecognitionState {
         };
 
         recognition.onerror = (event) => {
-            if (event.error === "not-allowed" ||
-                event.error === "service-not-allowed") {
+            if (
+                event.error === "not-allowed" ||
+                event.error === "service-not-allowed"
+            ) {
                 shouldContinueRef.current = false;
                 setError("Microphone permission was denied.");
-            } else if (event.error === "no-speech") {
-                // No speech detected. Continuous mode can restart.
-            } else if (event.error !== "aborted") {
+            } else if (
+                event.error !== "no-speech" &&
+                event.error !== "aborted"
+            ) {
+                shouldContinueRef.current = false;
                 setError(`Speech recognition error: ${event.error}`);
             }
         };
@@ -122,15 +144,15 @@ export function useSpeechRecognition(): SpeechRecognitionState {
                 modeRef.current === "continuous" &&
                 shouldContinueRef.current
             ) {
-                // Restart after the browser ends a recognition session.
-                window.setTimeout(() => {
+                restartTimerRef.current = setTimeout(() => {
                     if (!shouldContinueRef.current) return;
 
                     try {
                         recognition.start();
                     } catch {
-                        setIsListening(false);
                         shouldContinueRef.current = false;
+                        isListeningRef.current = false;
+                        setIsListening(false);
                         setError("Unable to restart speech recognition.");
                     }
                 }, 300);
@@ -138,6 +160,7 @@ export function useSpeechRecognition(): SpeechRecognitionState {
                 return;
             }
 
+            isListeningRef.current = false;
             setIsListening(false);
         };
 
@@ -145,17 +168,15 @@ export function useSpeechRecognition(): SpeechRecognitionState {
             recognition.start();
         } catch {
             shouldContinueRef.current = false;
+            isListeningRef.current = false;
             setIsListening(false);
             setError("Unable to start speech recognition.");
         }
-    }, [isListening]);
-
-    const resetTranscript = () => {
-        setTranscript("");
-    };
+    }, [resetTranscript]);
 
     return {
         transcript,
+        finalTranscript,
         isListening,
         isSupported,
         startListening,
