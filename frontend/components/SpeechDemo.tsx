@@ -1,11 +1,16 @@
 
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
-import { explainVocabulary, getVocabularyHistory } from "@/services/vocabulary";
+import {
+    explainVocabulary,
+    getVocabularyHistory,
+} from "@/services/vocabulary";
 import VocabularyCard from "@/components/VocabularyCard";
 import type { VocabularyRecord } from "@/types/vocabulary";
+
+type OrbMode = "idle" | "push-to-talk" | "active" | "processing" | "error";
 
 export default function SpeechDemo() {
     const {
@@ -14,17 +19,20 @@ export default function SpeechDemo() {
         isSupported,
         startListening,
         stopListening,
-        resetTranscript,
         error: speechError,
     } = useSpeechRecognition();
 
+    const [mode, setMode] = useState<OrbMode>("idle");
     const [history, setHistory] = useState<VocabularyRecord[]>([]);
-    const [explanation, setExplanation] = useState<VocabularyRecord | null>(null);
-    const [loading, setLoading] = useState(false);
+    const [explanation, setExplanation] =
+        useState<VocabularyRecord | null>(null);
     const [apiError, setApiError] = useState<string | null>(null);
-    const [continuousMode, setContinuousMode] = useState(false);
 
-    // Load saved vocabulary from PostgreSQL when the component mounts.
+    const spacePressed = useRef(false);
+    const pendingSubmission = useRef(false);
+    const activeListening = useRef(false);
+
+    // Load saved vocabulary from PostgreSQL.
     useEffect(() => {
         let cancelled = false;
 
@@ -36,7 +44,7 @@ export default function SpeechDemo() {
                     setHistory(records);
                 }
             } catch (error) {
-                console.error("Failed to load vocabulary history:", error);
+                console.error("Unable to load vocabulary history:", error);
             }
         }
 
@@ -47,51 +55,145 @@ export default function SpeechDemo() {
         };
     }, []);
 
-    // Submit the recognized text to the backend.
+    // Send recognized speech to FastAPI.
     const handleExplain = useCallback(async (text: string) => {
         const cleanedText = text.trim();
 
-        if (!cleanedText || loading) return;
+        if (!cleanedText) {
+            setMode("idle");
+            return;
+        }
 
-        setLoading(true);
+        setMode("processing");
         setApiError(null);
         setExplanation(null);
 
         try {
+            // The backend generates and saves the vocabulary record.
             const result = await explainVocabulary(cleanedText);
 
             setExplanation(result);
-
             setHistory((previous) => [
                 result,
                 ...previous.filter((item) => item.id !== result.id),
             ]);
+
+            setMode("idle");
         } catch (error) {
             setApiError(
                 error instanceof Error
                     ? error.message
-                    : "Unable to explain this vocabulary."
+                    : "Something went wrong while generating the explanation."
             );
-        } finally {
-            setLoading(false);
+            setMode("error");
         }
-    }, [loading]);
+    }, []);
 
-    // Stop listening and explain the recognized text.
-    const handleSubmit = async () => {
-        stopListening();
-
-        if (transcript.trim()) {
-            await handleExplain(transcript);
+    // Submit when speech recognition has stopped.
+    useEffect(() => {
+        if (!isListening && pendingSubmission.current) {
+            pendingSubmission.current = false;
+            activeListening.current = false;
+            setMode("processing");
+            void handleExplain(transcript);
         }
-    };
+    }, [isListening, transcript, handleExplain]);
 
-    // Text-to-speech using the browser's Speech Synthesis API.
-    const handleSpeak = (text: string) => {
-        if (!("speechSynthesis" in window)) {
-            setApiError("Text-to-speech is not supported by this browser.");
+    // Spacebar: push-to-talk.
+    useEffect(() => {
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (
+                event.code !== "Space" ||
+                event.repeat ||
+                event.target instanceof HTMLInputElement ||
+                event.target instanceof HTMLTextAreaElement
+            ) {
+                return;
+            }
+
+            event.preventDefault();
+
+            if (spacePressed.current || isListening) return;
+
+            spacePressed.current = true;
+            pendingSubmission.current = false;
+            setApiError(null);
+            setExplanation(null);
+            setMode("push-to-talk");
+
+            startListening("push-to-talk");
+        };
+
+        const handleKeyUp = (event: KeyboardEvent) => {
+            if (event.code !== "Space" || !spacePressed.current) return;
+
+            event.preventDefault();
+            spacePressed.current = false;
+
+            if (isListening) {
+                pendingSubmission.current = true;
+                stopListening();
+            }
+        };
+
+        const handleBlur = () => {
+            if (spacePressed.current) {
+                spacePressed.current = false;
+
+                if (isListening) {
+                    pendingSubmission.current = true;
+                    stopListening();
+                }
+            }
+        };
+
+        window.addEventListener("keydown", handleKeyDown);
+        window.addEventListener("keyup", handleKeyUp);
+        window.addEventListener("blur", handleBlur);
+
+        return () => {
+            window.removeEventListener("keydown", handleKeyDown);
+            window.removeEventListener("keyup", handleKeyUp);
+            window.removeEventListener("blur", handleBlur);
+        };
+    }, [isListening, startListening, stopListening]);
+
+    // Clicking the orb toggles continuous listening.
+    const handleOrbClick = () => {
+        if (mode === "processing") return;
+
+        if (activeListening.current && isListening) {
+            activeListening.current = false;
+            pendingSubmission.current = true;
+            stopListening();
             return;
         }
+
+        if (isListening || spacePressed.current) return;
+
+        pendingSubmission.current = false;
+        activeListening.current = true;
+        setApiError(null);
+        setExplanation(null);
+        setMode("active");
+
+        startListening("continuous");
+    };
+
+    // Keep visual state in sync with speech recognition errors.
+    useEffect(() => {
+        if (speechError) {
+            pendingSubmission.current = false;
+            activeListening.current = false;
+            spacePressed.current = false;
+            setMode("error");
+            setApiError(speechError);
+        }
+    }, [speechError]);
+
+    // Text-to-speech.
+    const handleSpeak = (text: string) => {
+        if (!("speechSynthesis" in window)) return;
 
         window.speechSynthesis.cancel();
 
@@ -102,142 +204,157 @@ export default function SpeechDemo() {
         window.speechSynthesis.speak(utterance);
     };
 
-    const handleHistoryClick = async (item: VocabularyRecord) => {
-        setExplanation(item);
-        setApiError(null);
+    const modeText: Record<OrbMode, string> = {
+        idle: "Press and hold Space to speak",
+        "push-to-talk": "Listening... release Space to finish",
+        active: "Active listening · Click to stop",
+        processing: "Thinking...",
+        error: "Something went wrong",
+    };
+
+    const orbClass: Record<OrbMode, string> = {
+        idle: "bg-zinc-800 hover:bg-zinc-700 shadow-zinc-900/20",
+        "push-to-talk":
+            "bg-blue-500 shadow-blue-500/40 scale-110",
+        active:
+            "bg-violet-500 shadow-violet-500/40 animate-pulse",
+        processing:
+            "bg-amber-500 shadow-amber-500/40 animate-pulse",
+        error: "bg-red-500 shadow-red-500/40",
     };
 
     if (!isSupported) {
         return (
-            <div className="rounded-lg border p-6">
-                <p>
-                    Speech recognition is not supported by this browser.
-                    Try a supported browser such as Chrome.
-                </p>
-            </div>
+            <main className="flex min-h-screen items-center justify-center bg-zinc-950 p-6 text-white">
+                <p>Speech recognition is not supported by this browser.</p>
+            </main>
         );
     }
 
     return (
-        <main className="mx-auto max-w-3xl space-y-8 p-6">
-            <header>
-                <h1 className="text-3xl font-bold">VocabAI</h1>
-                <p className="mt-2 text-gray-500">
-                    Speak an unfamiliar word or phrase and let AI explain it.
-                </p>
-            </header>
+        <main className="min-h-screen bg-zinc-950 text-white">
+            <div className="mx-auto flex min-h-screen max-w-3xl flex-col px-6 py-10">
 
-            {/* Speech recognition */}
-            <section className="space-y-4 rounded-xl border p-6">
-                <h2 className="text-xl font-semibold">Voice input</h2>
+                {/* Header */}
+                <header className="flex items-center justify-between">
+                    <h1 className="text-xl font-semibold tracking-tight">
+                        vocab<span className="text-violet-400">ai</span>
+                    </h1>
 
-                <label className="flex items-center gap-2">
-                    <input
-                        type="checkbox"
-                        checked={continuousMode}
-                        onChange={(event) => setContinuousMode(event.target.checked)}
-                        disabled={isListening}
-                    />
-                    Continuous listening
-                </label>
+                    <span className="text-xs tracking-widest text-zinc-500 uppercase">
+                        Voice vocabulary
+                    </span>
+                </header>
 
-                <div className="flex flex-wrap gap-3">
+                {/* Main voice interface */}
+                <section className="flex flex-1 flex-col items-center justify-center gap-10 py-16">
+
+                    <div className="text-center">
+                        <h2 className="text-3xl font-medium tracking-tight">
+                            Your reading companion.
+                        </h2>
+                        <p className="mt-3 text-sm text-zinc-500">
+                            Speak a word. Understand it instantly.
+                        </p>
+                    </div>
+
+                    {/* Voice orb */}
                     <button
-                        onClick={() => startListening(continuousMode ? "continuous" : "push-to-talk")}
-                        disabled={isListening || loading}
-                        className="rounded-lg bg-blue-600 px-4 py-2 text-white disabled:opacity-50"
+                        type="button"
+                        onClick={handleOrbClick}
+                        disabled={mode === "processing"}
+                        aria-label="Toggle active listening"
+                        className={`relative flex h-48 w-48 items-center justify-center rounded-full shadow-2xl transition-all duration-300 ease-out focus:outline-none focus-visible:ring-4 focus-visible:ring-violet-400/50 disabled:cursor-wait ${orbClass[mode]}`}
                     >
-                        Start listening
+                        <span className="absolute inset-[-12px] rounded-full border border-white/5" />
+                        <span className="absolute inset-[-24px] rounded-full border border-white/[0.03]" />
+
+                        {mode === "processing" ? (
+                            <div className="h-9 w-9 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                        ) : (
+                            <div className="h-5 w-5 rounded-full bg-white/90" />
+                        )}
                     </button>
 
-                    <button
-                        onClick={stopListening}
-                        disabled={!isListening}
-                        className="rounded-lg bg-gray-200 px-4 py-2 text-gray-900 disabled:opacity-50"
-                    >
-                        Stop listening
-                    </button>
+                    {/* Status */}
+                    <div className="space-y-3 text-center">
+                        <p className="text-sm font-medium text-zinc-300">
+                            {modeText[mode]}
+                        </p>
 
-                    <button
-                        onClick={() => {
-                            resetTranscript();
-                            setExplanation(null);
-                            setApiError(null);
-                        }}
-                        disabled={isListening}
-                    >
-                        Clear
-                    </button>
-                </div>
+                        <p className="text-xs text-zinc-600">
+                            Click the circle for active listening
+                        </p>
+                    </div>
 
-                <div className="min-h-24 rounded-lg bg-gray-50 p-4">
-                    <p className="text-sm text-gray-500">
-                        {isListening ? "Listening..." : "Your recognized speech will appear here."}
-                    </p>
-                    <p className="mt-2 text-gray-900">{transcript || "..."}</p>
-                </div>
-
-                {speechError && (
-                    <p className="text-sm text-red-600">{speechError}</p>
-                )}
-
-                <button
-                    onClick={handleSubmit}
-                    disabled={!transcript.trim() || loading}
-                    className="w-full rounded-lg bg-black px-4 py-3 text-white disabled:opacity-50"
-                >
-                    {loading ? "Generating explanation..." : "Explain with AI"}
-                </button>
-            </section>
-
-            {/* API errors */}
-            {apiError && (
-                <div className="rounded-lg bg-red-50 p-4 text-red-700">
-                    {apiError}
-                </div>
-            )}
-
-            {/* Vocabulary explanation */}
-            {explanation && (
-                <section className="space-y-3">
-                    <h2 className="text-xl font-semibold">Explanation</h2>
-                    <VocabularyCard
-                        vocabulary={explanation}
-                        onSpeak={handleSpeak}
-                    />
+                    {/* Live transcript */}
+                    {transcript && isListening && (
+                        <div className="max-w-lg text-center">
+                            <p className="text-lg text-zinc-400">{transcript}</p>
+                        </div>
+                    )}
                 </section>
-            )}
 
-            {/* Saved vocabulary */}
-            <section className="space-y-4">
-                <h2 className="text-xl font-semibold">
-                    Recent vocabulary ({history.length})
-                </h2>
-
-                {history.length === 0 ? (
-                    <p className="text-gray-500">No saved vocabulary yet.</p>
-                ) : (
-                    <div className="space-y-2">
-                        {history.map((item) => (
-                            <button
-                                key={item.id}
-                                onClick={() => handleHistoryClick(item)}
-                                className="flex w-full items-center justify-between rounded-lg border p-4 text-left hover:bg-gray-50"
-                            >
-                                <div>
-                                    <p className="font-semibold">{item.term}</p>
-                                    <p className="text-sm text-gray-500">
-                                        {item.definition}
-                                    </p>
-                                </div>
-                                <span className="text-xs text-gray-400">
-                                    {new Date(item.created_at).toLocaleDateString()}
-                                </span>
-                            </button>
-                        ))}
+                {/* Error */}
+                {apiError && (
+                    <div className="mb-6 rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-300">
+                        {apiError}
                     </div>
                 )}
-            </section>
+
+                {/* Explanation */}
+                {explanation && (
+                    <section className="mb-10 rounded-2xl border border-white/10 bg-zinc-900 p-6">
+                        <div className="mb-4 flex items-center justify-between">
+                            <h3 className="text-xs font-medium uppercase tracking-widest text-zinc-500">
+                                Vocabulary explanation
+                            </h3>
+
+                            <button
+                                onClick={() =>
+                                    handleSpeak(
+                                        `${explanation.term}. ${explanation.simple_explanation}`
+                                    )
+                                }
+                                className="text-sm text-violet-400 hover:text-violet-300"
+                            >
+                                Listen
+                            </button>
+                        </div>
+
+                        <VocabularyCard
+                            vocabulary={explanation}
+                            onSpeak={handleSpeak}
+                        />
+                    </section>
+                )}
+
+                {/* Recent vocabulary */}
+                <footer className="border-t border-white/10 pt-5">
+                    <div className="flex items-center justify-between">
+                        <span className="text-xs text-zinc-500">
+                            YOUR VOCABULARY
+                        </span>
+                        <span className="text-xs text-zinc-500">
+                            {history.length} saved
+                        </span>
+                    </div>
+
+                    {history.length > 0 && (
+                        <div className="mt-4 flex flex-wrap gap-2">
+                            {history.slice(0, 8).map((item) => (
+                                <button
+                                    key={item.id}
+                                    onClick={() => setExplanation(item)}
+                                    className="rounded-full border border-white/10 px-3 py-1.5 text-sm text-zinc-400 transition hover:border-violet-400/50 hover:text-white"
+                                >
+                                    {item.term}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                </footer>
+            </div>
         </main>
     );
 }
