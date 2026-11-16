@@ -12,6 +12,7 @@ interface SpeechRecognitionState {
     error: string | null;
     startListening: (mode: ListeningMode) => void;
     stopListening: () => void;
+    resetTranscript: () => void;
 }
 
 export function useSpeechRecognition(): SpeechRecognitionState {
@@ -149,12 +150,17 @@ export function useSpeechRecognition(): SpeechRecognitionState {
         }
     }, [isListening]);
 
+    const resetTranscript = () => {
+        setTranscript("");
+    };
+
     return {
-        isSupported,
-        isListening,
         transcript,
-        error,
+        isListening,
+        isSupported,
         startListening,
         stopListening,
+        resetTranscript,
+        error,
     };
 }

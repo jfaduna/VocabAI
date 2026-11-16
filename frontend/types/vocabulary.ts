@@ -9,3 +9,8 @@ export interface VocabularyExplanation {
     synonyms: string[];
     context_note: string;
 }
+
+export interface VocabularyRecord extends VocabularyExplanation {
+    id: number;
+    created_at: string;
+}

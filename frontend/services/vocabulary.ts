@@ -4,9 +4,14 @@ import type { VocabularyExplanation } from "@/types/vocabulary";
 const API_BASE_URL =
     process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
+export interface VocabularyRecord extends VocabularyExplanation {
+    id: number;
+    created_at: string;
+}
+
 export async function explainVocabulary(
     text: string
-): Promise<VocabularyExplanation> {
+): Promise<VocabularyRecord> {
     const response = await fetch(
         `${API_BASE_URL}/api/v1/vocabulary/explain`,
         {
@@ -22,9 +27,54 @@ export async function explainVocabulary(
 
     if (!response.ok) {
         throw new Error(
-            data.detail || "Unable to explain this vocabulary."
+            data.detail || "Unable to explain vocabulary."
         );
     }
 
-    return data as VocabularyExplanation;
+    return data;
+}
+
+
+export async function getVocabularyHistory(
+    limit = 50,
+    offset = 0
+): Promise<VocabularyRecord[]> {
+    const response = await fetch(
+        `${API_BASE_URL}/api/v1/vocabulary/history?limit=${limit}&offset=${offset}`,
+        {
+            cache: "no-store",
+        }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        throw new Error(
+            data.detail || "Unable to retrieve vocabulary history."
+        );
+    }
+
+    return data;
+}
+
+
+export async function getVocabularyById(
+    id: number
+): Promise<VocabularyRecord> {
+    const response = await fetch(
+        `${API_BASE_URL}/api/v1/vocabulary/${id}`,
+        {
+            cache: "no-store",
+        }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        throw new Error(
+            data.detail || "Unable to retrieve vocabulary."
+        );
+    }
+
+    return data;
 }
